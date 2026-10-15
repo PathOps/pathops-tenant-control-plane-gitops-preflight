@@ -1,8 +1,8 @@
-# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-ztg9h).
+# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-w4bmm).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-control-plane-run-preflight-tests-ztg9h
+  name: tenant-control-plane-run-preflight-tests-w4bmm
   labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "bbe9cfe1e557"}
 spec:
   backoffLimit: 0
@@ -19,6 +19,6 @@ spec:
           image: tenant-control-plane-integration-tests
           env:
             - {name: CP_BASE_URL, value: "http://tenant-control-plane.pathops-tenant-control-plane-preflight.svc.cluster.local:8080"}
-            - {name: CP_HEALTH_PATH, value: "/healthz"}
+            - {name: CP_HEALTH_PATH, value: "/not-healthz"}
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
