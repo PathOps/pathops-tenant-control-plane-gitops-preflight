@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-control-plane
+  labels: {app.kubernetes.io/name: tenant-control-plane, app.kubernetes.io/part-of: pathops}
+spec:
+  selector: {app.kubernetes.io/name: tenant-control-plane}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

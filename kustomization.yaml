@@ -1,0 +1,19 @@
+# Preflight desired state of the Tenant Control Plane, reconciled by Flux from
+# pathops-tenant-control-plane-flux-preflight. Only the preflight Tekton stage writes it:
+# DEPLOY PREFLIGHT sets the image and RUN PREFLIGHT TESTS adds the run's integration-test Job.
+# The image is the immutable revision tag (first 12 characters of the source
+# commit, Decision 0043); never a digest, never an environment tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pathops-tenant-control-plane-preflight
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/instance: preflight
+resources:
+- deployment.yaml
+- service.yaml
+images:
+- name: tenant-control-plane
+  newName: zot-dev.demo.pathops.io/pathops/tenant-control-plane
+  newTag: "4505a8c5d933"
