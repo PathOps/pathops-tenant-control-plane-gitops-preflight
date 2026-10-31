@@ -1,9 +1,9 @@
-# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-t6l6d).
+# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-tl4sd).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-control-plane-run-preflight-tests-t6l6d
-  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "ada0418f85de"}
+  name: tenant-control-plane-run-preflight-tests-tl4sd
+  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "07d246c8106a"}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
@@ -20,5 +20,11 @@ spec:
           env:
             - {name: CP_BASE_URL, value: "http://tenant-control-plane.pathops-tenant-control-plane-preflight.svc.cluster.local:8080"}
             - {name: CP_HEALTH_PATH, value: "/healthz"}
+            - {name: CP_REQUIRE_LOGIN, value: "1"}
+            - {name: CP_LOGIN_USERNAME, valueFrom: {secretKeyRef: {name: tenant-cp-preflight-login, key: username}}}
+            - {name: CP_LOGIN_PASSWORD, valueFrom: {secretKeyRef: {name: tenant-cp-preflight-login, key: password}}}
+            - {name: CP_OIDC_CA_FILE, value: /etc/pathops/cell-ca/ca.crt}
+          volumeMounts: [{name: cell-ca, mountPath: /etc/pathops/cell-ca, readOnly: true}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+      volumes: [{name: cell-ca, configMap: {name: tenant-control-plane-cell-ca}}]
