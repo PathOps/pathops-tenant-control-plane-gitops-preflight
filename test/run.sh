@@ -328,7 +328,7 @@ assert on == {"push": {"tags": ["release/*"]}} and w["permissions"] == {}
 j = w["jobs"]["publish"]
 assert j["permissions"] == {"contents": "read", "packages": "write", "id-token": "write", "attestations": "write"}
 s = yaml.safe_dump(j)
-assert "--preserve-digests" in s and "a release never moves" in s and "actions/attest@" in s and "secrets." not in s
+assert "--preserve-digests" in s and "a release never moves" in s and "actions/attest@" in s and "secrets." not in s and "password: ${{ github.token }}" in s
 ' "$ROOT/.github/workflows/promote-release.yml"
 
 # --- GitOps edits with the real kustomize

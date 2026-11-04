@@ -108,6 +108,15 @@ jobs:
             echo "| pin | \`$RELEASE_IMAGE@$DIGEST\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The attestation is stored next to the image: the registry login of this
+      # run's GITHUB_TOKEN only.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - name: Attest provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
