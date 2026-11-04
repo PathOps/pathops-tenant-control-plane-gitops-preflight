@@ -25,7 +25,6 @@ spec:
   results:
     - {name: tests-digest, value: $(tasks.build-tests.results.VALUE)}
     - {name: gitops-commit, value: $(tasks.prepare-tests.results.GITOPS_COMMIT)}
-    - {name: test-job, value: $(context.pipelineRun.name)}
     - {name: tests, value: $(tasks.wait-tests.results.STATUS)}
   tasks:
     - name: preflight-runs-candidate
