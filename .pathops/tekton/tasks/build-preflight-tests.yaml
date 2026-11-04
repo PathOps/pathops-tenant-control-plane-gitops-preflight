@@ -178,8 +178,8 @@ spec:
         ref="${ZOT_HOST}/$(params.REPO):$rev"
         # Create-only (Decision 0043; zot also denies the update): an existing
         # tag is adopted only if it was built from this commit.
-        if skopeo inspect --cert-dir /etc/pathops/registry-ca --config "docker://$ref" > /tmp/config.json 2>/dev/null; then
-          label=$(sed -n 's/.*"org.opencontainers.image.revision":"\([0-9a-f]*\)".*/\1/p' /tmp/config.json)
+        if label=$(skopeo inspect --cert-dir /etc/pathops/registry-ca --format '{{index .Labels "org.opencontainers.image.revision"}}' "docker://$ref" 2>/dev/null); then
+          label=$(printf '%s' "$label" | tr -d '\n')
           [ "$label" = "$commit" ] || { echo "artifact-integrity: $ref exists, built from '$label', not $commit; never overwritten"; exit 1; }
           adopted=true
           echo "$ref already exists for $commit: adopted, not rebuilt over"
