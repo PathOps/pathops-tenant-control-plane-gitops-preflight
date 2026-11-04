@@ -65,13 +65,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          src="docker://$CANDIDATE_REGISTRY/pathops/tenant-control-plane@$DIGEST"
-          dst="docker://$RELEASE_IMAGE:$REV"
-          # The candidate: exactly the digest, labeled with the source commit.
-          skopeo inspect --raw "$src" > manifest.json
-          [ "sha256:$(sha256sum < manifest.json | cut -d' ' -f1)" = "$DIGEST" ] || { echo "::error::the candidate bytes are not $DIGEST"; exit 1; }
-          label=$(skopeo inspect --config "$src" | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')
+          # zot serves the candidate's documents to anonymous GETs (its token
+          # service refuses anonymous registry clients, so skopeo cannot pull
+          # it): each document is fetched, checked against its digest and laid
+          # out as an OCI layout that skopeo copies from (the same bytes).
+          api="https://$CANDIDATE_REGISTRY/v2/pathops/tenant-control-plane"
+          mkdir -p oci/blobs/sha256
+          curl -sS --fail -H 'Accept: application/vnd.oci.image.manifest.v1+json' -o "oci/blobs/sha256/${DIGEST#sha256:}" "$api/manifests/$DIGEST"
+          for d in "$DIGEST" $(jq -r '.config.digest, .layers[].digest' "oci/blobs/sha256/${DIGEST#sha256:}"); do
+            f="oci/blobs/sha256/${d#sha256:}"
+            [ -s "$f" ] || curl -sS --fail -L -o "$f" "$api/blobs/$d"
+            [ "sha256:$(sha256sum < "$f" | cut -d' ' -f1)" = "$d" ] || { echo "::error::the candidate's $d does not match its bytes"; exit 1; }
+          done
+          m="oci/blobs/sha256/${DIGEST#sha256:}"
+          [ "$(jq -r .mediaType "$m")" = application/vnd.oci.image.manifest.v1+json ] || { echo "::error::the candidate is not a single OCI image manifest"; exit 1; }
+          label=$(jq -r '.config.Labels["org.opencontainers.image.revision"] // ""' "oci/blobs/sha256/$(jq -r '.config.digest | sub("sha256:"; "")' "$m")")
           [ "$label" = "$COMMIT" ] || { echo "::error::the candidate is labeled $label, not $COMMIT"; exit 1; }
+          printf '{"imageLayoutVersion":"1.0.0"}' > oci/oci-layout
+          jq -n --arg d "$DIGEST" --argjson n "$(stat -c %s "$m")" --arg t "$REV" \
+            '{schemaVersion: 2, manifests: [{mediaType: "application/vnd.oci.image.manifest.v1+json", digest: $d, size: $n, annotations: {"org.opencontainers.image.ref.name": $t}}]}' > oci/index.json
+          src="oci:oci:$REV"
+          dst="docker://$RELEASE_IMAGE:$REV"
           printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
           if existing=$(skopeo inspect --format '{{.Digest}}' "$dst" 2>/dev/null); then
             [ "$existing" = "$DIGEST" ] || { echo "::error::$RELEASE_IMAGE:$REV already is $existing, not $DIGEST; a release never moves"; exit 1; }
