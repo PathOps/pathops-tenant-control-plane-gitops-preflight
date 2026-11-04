@@ -30,7 +30,7 @@ spec:
     - {name: REPO, default: pathops/tenant-control-plane-integration-tests, description: test-image repository in the Cell zot}
     - {name: DOCKERFILE, default: test/integration/Dockerfile, description: "Dockerfile in the source; the context is the repository root"}
     - {name: CACHE, default: "pathops/cache/tenant-control-plane:integration-tests", description: "the cache tag this build exports"}
-    - {name: IMPORT_CACHES, default: "pathops/cache/tenant-control-plane:buildkit pathops/cache/tenant-control-plane:integration-tests", description: "cache tags imported (missing ones are skipped)"}
+    - {name: IMPORT_CACHES, default: "pathops/cache/tenant-control-plane:integration-tests", description: "cache tags imported (a missing one is skipped); only this build's own: importing two caches that share a prefix stops the reuse after it"}
   results:
     - {name: DIGEST, description: "OCI digest of the test-image tag"}
     - {name: ADOPTED, description: "true if the test-image tag already existed for COMMIT and was reused"}
