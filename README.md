@@ -59,6 +59,10 @@ repository; BUILD_PREFLIGHT_TESTS has BUILD, source read and test-image/cache
 registry write, and no GitOps authority. Flux only reads. The release tag is
 created once and never moved.
 
+`test/run.sh` checks these definitions (topology, gates, identities) and runs
+their step scripts against stubs (stage requests, Flux, rollout, the test Job,
+the release tag and the GHCR digest check).
+
 In the dev Cell these definitions are installed administratively
 (`pathops-dev-cell-bootstrap/scripts/tenant-cp.sh <cell> install`) from this
 repository's committed `.pathops/`: the Tenant Control Plane cannot provision the
