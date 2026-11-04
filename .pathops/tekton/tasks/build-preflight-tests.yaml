@@ -67,7 +67,11 @@ spec:
         [ "$(params.CLONED)" = "$(params.COMMIT)" ] && [ "$head" = "$(params.COMMIT)" ] \
           || { echo "source HEAD is $head (CLONE_SOURCE saw $(params.CLONED)), not the candidate $(params.COMMIT): no tests of a newer source for an older candidate; fails closed"; exit 1; }
         [ "$(params.IMAGE_REVISION)" = "$(printf '%s' "$head" | cut -c1-12)" ] || { echo "revision $(params.IMAGE_REVISION) is not derived from $head"; exit 1; }
-        chmod -R a+rX /work/src
+        # A context whose metadata depends on its content only: BuildKit's
+        # COPY checksums include modes, and the BUILD Pod's fsGroup volume
+        # gives directories setgid; normalized, the registry cache hits.
+        find /work/src -type d -exec chmod 0755 {} +
+        find /work/src -type f -exec chmod u+rw,go+r,go-w {} +
         echo "building $head"
     - name: auth
       image: quay.io/skopeo/stable:v1.20.0@sha256:47853bb9fb24202af9110531ebd6e43c5f97701254ca290596640290d17942f4
