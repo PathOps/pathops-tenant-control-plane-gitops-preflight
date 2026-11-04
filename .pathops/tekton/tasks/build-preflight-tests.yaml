@@ -106,6 +106,9 @@ spec:
       env:
         - {name: HOME, value: /home/user}
         - {name: DOCKER_CONFIG, value: /auth}
+        # buildctl fetches the registry token itself: it trusts the Cell CA too
+        # (the system roots stay; SSL_CERT_DIR adds the directory).
+        - {name: SSL_CERT_DIR, value: /etc/pathops/registry-ca}
         - {name: BUILDKITD_FLAGS, value: "--oci-worker-no-process-sandbox --root /storage/buildkit --config /auth/buildkitd.toml"}
         - {name: BUILDKITD_READY_SECONDS, value: "60"}
       computeResources:
