@@ -1,9 +1,9 @@
-# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-s46s5).
+# One test run, written by the run preflight tests for tenant control plane pipeline (tenant-control-plane-run-preflight-tests-25f5x).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-control-plane-run-preflight-tests-s46s5
-  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "3ad49fdfffe4"}
+  name: tenant-control-plane-run-preflight-tests-25f5x
+  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "9eb492d2ef90"}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
