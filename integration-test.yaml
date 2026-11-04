@@ -1,8 +1,8 @@
-# One integration-test run, written by PREPARE_PREFLIGHT_TESTS (tenant-control-plane-run-preflight-tests-jpf7l).
+# One integration-test run, written by PREPARE_PREFLIGHT_TESTS (tenant-control-plane-run-preflight-tests-b2cwt).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-control-plane-run-preflight-tests-jpf7l
+  name: tenant-control-plane-run-preflight-tests-b2cwt
   labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "727657a2642b"}
   annotations: {pathops.io/source-commit: "727657a2642bc7c6758207d04e0ce8fafbbab566", pathops.io/tests-digest: "sha256:57d3a47a87ec405ec3ca81fd2f0d0ab3abce5ff26110268f74a70b90931c115f"}
 spec:
