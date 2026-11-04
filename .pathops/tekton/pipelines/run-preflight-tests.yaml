@@ -1,0 +1,82 @@
+# RUN_PREFLIGHT_TESTS (Decision 0051), namespace pathops-tenant-control-plane-tekton-preflight.
+# Requested by DEPLOY_PREFLIGHT for the deployed candidate. Integration tests
+# against the running candidate and the Cell's real Dex, PostgreSQL and TLS
+# (unit tests ran in the source image build).
+#
+#   preflight-runs-candidate  VERIFY_ROLLOUT: preflight still runs the candidate
+#   build-tests               REQUEST_STAGE + wait: BUILD_PREFLIGHT_TESTS in the
+#                             build stage -> the test image's digest
+#   prepare-tests             CLONE_GITOPS -> PREPARE_PREFLIGHT_TESTS (a fresh
+#                             Job with that test image) -> PUSH_GITOPS
+#   flux-reconcile            FLUX_RECONCILE: Flux creates the Job
+#   wait-tests                WAIT_PREFLIGHT_TESTS: the real Job's result
+#   request-promote-release   REQUEST_STAGE: PROMOTE_RELEASE, only if they passed
+#
+# GENERAL; preflight GitOps write only (no source read, no BUILD, no registry).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata: {name: tenant-control-plane-run-preflight-tests, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+    - {name: digest}
+    - {name: health-path, default: /healthz, description: probed path (fault injection only)}
+  results:
+    - {name: tests-digest, value: $(tasks.build-tests.results.VALUE)}
+    - {name: gitops-commit, value: $(tasks.prepare-tests.results.GITOPS_COMMIT)}
+    - {name: test-job, value: $(context.pipelineRun.name)}
+    - {name: tests, value: $(tasks.wait-tests.results.STATUS)}
+  tasks:
+    - name: preflight-runs-candidate
+      taskRef: {name: verify-rollout}
+      params:
+        - {name: IMAGE, value: "${ZOT_HOST}/pathops/tenant-control-plane:$(params.revision)"}
+        - {name: DIGEST, value: $(params.digest)}
+    - name: build-tests
+      runAfter: [preflight-runs-candidate]
+      taskRef: {name: request-stage}
+      params:
+        - {name: URL, value: http://el-tenant-control-plane-build.pathops-tenant-control-plane-tekton-build.svc.cluster.local:8080}
+        - {name: EVENT, value: build-preflight-tests}
+        - {name: TOKEN_SECRET, value: tenant-cp-build-trigger}
+        - {name: NAMESPACE, value: pathops-tenant-control-plane-tekton-build}
+        - {name: PIPELINE, value: tenant-control-plane-build-preflight-tests}
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: WAIT, value: "true"}
+        - {name: RESULT, value: tests-digest}
+    - name: prepare-tests
+      taskRef: {name: prepare-preflight-tests}
+      params:
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: TESTS_DIGEST, value: $(tasks.build-tests.results.VALUE)}
+        - {name: JOB_NAME, value: $(context.pipelineRun.name)}
+        - {name: HEALTH_PATH, value: $(params.health-path)}
+        - {name: PIPELINE_RUN, value: $(context.pipelineRun.name)}
+    - name: flux-reconcile
+      taskRef: {name: flux-reconcile}
+      params:
+        - {name: GITOPS_COMMIT, value: $(tasks.prepare-tests.results.GITOPS_COMMIT)}
+    - name: wait-tests
+      runAfter: [flux-reconcile]
+      taskRef: {name: wait-preflight-tests}
+      params:
+        - {name: JOB_NAME, value: $(context.pipelineRun.name)}
+        - {name: TESTS_DIGEST, value: $(tasks.build-tests.results.VALUE)}
+    - name: request-promote-release
+      runAfter: [wait-tests]
+      taskRef: {name: request-stage}
+      params:
+        - {name: URL, value: http://el-tenant-control-plane-preflight.pathops-tenant-control-plane-tekton-preflight.svc.cluster.local:8080}
+        - {name: EVENT, value: promote-release}
+        - {name: TOKEN_SECRET, value: tenant-cp-preflight-trigger}
+        - {name: NAMESPACE, value: pathops-tenant-control-plane-tekton-preflight}
+        - {name: PIPELINE, value: tenant-control-plane-promote-release}
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: DIGEST, value: $(params.digest)}
+        - {name: TESTS_DIGEST, value: $(tasks.build-tests.results.VALUE)}
+        - {name: GITOPS_COMMIT, value: $(tasks.prepare-tests.results.GITOPS_COMMIT)}
+        - {name: TEST_JOB, value: $(context.pipelineRun.name)}

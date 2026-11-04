@@ -1,0 +1,27 @@
+# CLONE_GITOPS (Decision 0051): a StepAction used by the Tasks that change this
+# repository. It clones the repository's current main (with its tags) into
+# /work/gitops: the latest desired state, observed immediately before a
+# bounded change. No revision is received. The Task provides the volumes
+# "gitops" (work directory) and "gitops-key" (Secret
+# tenant-cp-gitops-preflight-write: this repository's own write deploy key).
+apiVersion: tekton.dev/v1beta1
+kind: StepAction
+metadata: {name: clone-gitops}
+spec:
+  params:
+    - {name: REPO, default: pathops/pathops-tenant-control-plane-gitops-preflight}
+  image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+  securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+  env:
+    - {name: HOME, value: /tmp}
+    - {name: REPO, value: $(params.REPO)}
+  volumeMounts:
+    - {name: gitops, mountPath: /work}
+    - {name: gitops-key, mountPath: /pathops/key, readOnly: true}
+  script: |
+    #!/bin/sh
+    set -eu
+    install -m 0600 /pathops/key/identity /tmp/git-identity
+    export GIT_SSH_COMMAND="ssh -i /tmp/git-identity -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/pathops/key/known_hosts"
+    git clone --quiet --branch main "ssh://git@forgejo.scm.svc.cluster.local:2222/$REPO.git" /work/gitops
+    git -C /work/gitops log -1 --format='GitOps HEAD %H %s'

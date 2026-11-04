@@ -1,0 +1,32 @@
+# PROMOTE_RELEASE (Decisions 0045, 0051), namespace pathops-tenant-control-plane-tekton-preflight.
+# Requested by RUN_PREFLIGHT_TESTS after the integration tests passed. Publishes
+# the exact tested candidate (same OCI content and digest, no rebuild) as
+# ghcr.io/pathops/pathops-tenant-control-plane:<revision> through the release
+# tag release/<revision> and the GitHub mirror's workflow; no registry
+# credential in the Cell and no dev production environment. Its result
+# `release` is what INSTALL_CANARY consumes.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata: {name: tenant-control-plane-promote-release, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+    - {name: digest}
+    - {name: tests-digest}
+    - {name: gitops-commit}
+    - {name: test-job}
+  results:
+    - {name: release, value: $(tasks.promote-release.results.RELEASE)}
+    - {name: adopted, value: $(tasks.promote-release.results.ADOPTED)}
+  tasks:
+    - name: promote-release
+      taskRef: {name: promote-release}
+      params:
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: DIGEST, value: $(params.digest)}
+        - {name: TESTS_DIGEST, value: $(params.tests-digest)}
+        - {name: GITOPS_COMMIT, value: $(params.gitops-commit)}
+        - {name: TEST_JOB, value: $(params.test-job)}
+        - {name: TESTS_RUN, value: $(params.test-job)}

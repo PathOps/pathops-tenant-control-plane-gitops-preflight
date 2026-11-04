@@ -1,0 +1,111 @@
+# REQUEST_STAGE (Decision 0051): the dev bootstrap's authenticated internal
+# HTTP chaining. Ask the EventListener of another stage to start one of its
+# pipelines for a candidate, then confirm the handoff: exactly one PipelineRun
+# of that event, of the requested pipeline, for this commit and revision, in
+# the stage's namespace. With WAIT=true it also waits for that run to succeed
+# and returns one of its results (RESULT) as VALUE.
+#
+# The receiving EventListener checks the shared stage token (core "gitlab"
+# interceptor: X-Gitlab-Token) and the event type, and validates the body; the
+# token travels in a header file, never as an argument. This Task reads
+# PipelineRuns of the requested namespace with its own short-lived projected
+# ServiceAccount token (RBAC: get/list there); it carries no authority of the
+# requested stage. Installed in the build and preflight stage namespaces.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: request-stage}
+spec:
+  params:
+    - {name: URL, description: EventListener URL of the requested stage}
+    - {name: EVENT, description: "event type, e.g. deploy-preflight"}
+    - {name: TOKEN_SECRET, description: Secret (key "token") shared with that EventListener}
+    - {name: NAMESPACE, description: "namespace of that EventListener, where the requested PipelineRun is created"}
+    - {name: PIPELINE, description: "pipeline the request must start, e.g. tenant-control-plane-deploy-preflight"}
+    - {name: COMMIT}
+    - {name: IMAGE_REVISION}
+    - {name: DIGEST, default: "", description: candidate digest (empty when the stage does not take it)}
+    - {name: TESTS_DIGEST, default: ""}
+    - {name: GITOPS_COMMIT, default: ""}
+    - {name: TEST_JOB, default: ""}
+    - {name: HEALTH_PATH, default: /healthz, description: preflight probe path (fault injection only)}
+    - {name: HANDOFF_TIMEOUT, default: "120", description: "seconds to wait for the requested PipelineRun to be created"}
+    - {name: WAIT, default: "false", description: "true: wait for the requested run to succeed"}
+    - {name: WAIT_TIMEOUT, default: "2400", description: "seconds to wait for it with WAIT=true"}
+    - {name: RESULT, default: "", description: "with WAIT=true: the result of the requested run to return as VALUE"}
+  results:
+    - {name: RUN, description: the requested PipelineRun}
+    - {name: VALUE, description: "with WAIT=true and RESULT: that result of the requested run"}
+  volumes:
+    - {name: token, secret: {secretName: $(params.TOKEN_SECRET), defaultMode: 0444}}
+    - name: api
+      projected:
+        defaultMode: 0444
+        sources:
+          - serviceAccountToken: {path: token, expirationSeconds: 3600}
+          - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
+  steps:
+    - name: request
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts:
+        - {name: token, mountPath: /pathops/token, readOnly: true}
+        - {name: api, mountPath: /pathops/api, readOnly: true}
+      script: |
+        #!/bin/sh
+        set -eu
+        body=$(jq -n --arg c "$(params.COMMIT)" --arg r "$(params.IMAGE_REVISION)" --arg d "$(params.DIGEST)" \
+          --arg td "$(params.TESTS_DIGEST)" --arg g "$(params.GITOPS_COMMIT)" --arg j "$(params.TEST_JOB)" --arg p "$(params.HEALTH_PATH)" \
+          '{commit: $c, revision: $r, digest: $d, testsDigest: $td, gitopsCommit: $g, testJob: $j, healthPath: $p}')
+        # The token goes through a header file, never through command arguments.
+        printf 'X-Gitlab-Token: %s\n' "$(cat /pathops/token/token)" > /tmp/headers
+        code=$(curl -sS -o /tmp/response -w '%{http_code}' -H @/tmp/headers -H "X-Gitlab-Event: $(params.EVENT)" \
+          -H 'Content-Type: application/json' --data "$body" "$(params.URL)")
+        [ "$code" = 202 ] || { echo "stage request $(params.EVENT) failed: HTTP $code"; cat /tmp/response; exit 1; }
+        event=$(jq -r '.eventID // empty' /tmp/response 2>/dev/null || true)
+        printf '%s' "$event" | grep -Eqx '[0-9a-f-]{36}' || { echo "stage request $(params.EVENT): the EventListener returned no event ID"; exit 1; }
+        # The EventListener answers 202 before its interceptors decide: the
+        # handoff is complete only when exactly one PipelineRun of this event
+        # exists in the requested stage, for this pipeline, commit and revision.
+        printf 'Authorization: Bearer %s\n' "$(cat /pathops/api/token)" > /tmp/api-headers
+        api="https://kubernetes.default.svc/apis/tekton.dev/v1/namespaces/$(params.NAMESPACE)/pipelineruns?labelSelector=triggers.tekton.dev%2Ftriggers-eventid%3D$event"
+        deadline=$(( $(date +%s) + $(params.HANDOFF_TIMEOUT) ))
+        while :; do
+          code=$(curl -sS --cacert /pathops/api/ca.crt -H @/tmp/api-headers -o /tmp/runs -w '%{http_code}' "$api")
+          [ "$code" = 200 ] || { echo "handoff: cannot list PipelineRuns in $(params.NAMESPACE) (HTTP $code)"; exit 1; }
+          n=$(jq '.items | length' /tmp/runs)
+          if [ "$n" -gt 1 ]; then
+            echo "handoff: $n PipelineRuns for event $event in $(params.NAMESPACE) ($(jq -r '[.items[].metadata.name] | join(", ")' /tmp/runs)); refusing to pick one"; exit 1
+          fi
+          [ "$n" = 0 ] || break
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "handoff: $(params.EVENT) for $(params.IMAGE_REVISION) was accepted (HTTP 202, event $event) but no PipelineRun appeared in $(params.NAMESPACE) within $(params.HANDOFF_TIMEOUT)s: the EventListener rejected the request or could not start it"
+            exit 1
+          fi
+          sleep 2
+        done
+        run=$(jq -r '.items[0].metadata.name' /tmp/runs)
+        jq -e --arg p "$(params.PIPELINE)" --arg c "$(params.COMMIT)" --arg r "$(params.IMAGE_REVISION)" \
+          '.items[0] | .spec.pipelineRef.name == $p and any(.spec.params[]; .name == "commit" and .value == $c) and any(.spec.params[]; .name == "revision" and .value == $r)' \
+          /tmp/runs >/dev/null || { echo "handoff: PipelineRun $run of event $event is not $(params.PIPELINE) for $(params.COMMIT)"; exit 1; }
+        printf '%s' "$run" > "$(results.RUN.path)"
+        echo "requested $(params.EVENT) for $(params.IMAGE_REVISION) ($(params.COMMIT)): event $event -> PipelineRun $run"
+        if [ "$(params.WAIT)" != true ]; then printf '' > "$(results.VALUE.path)"; exit 0; fi
+        one="https://kubernetes.default.svc/apis/tekton.dev/v1/namespaces/$(params.NAMESPACE)/pipelineruns/$run"
+        deadline=$(( $(date +%s) + $(params.WAIT_TIMEOUT) ))
+        while :; do
+          code=$(curl -sS --cacert /pathops/api/ca.crt -H @/tmp/api-headers -o /tmp/run -w '%{http_code}' "$one")
+          [ "$code" = 200 ] || { echo "cannot read PipelineRun $run in $(params.NAMESPACE) (HTTP $code)"; exit 1; }
+          status=$(jq -r '[.status.conditions[]? | select(.type == "Succeeded")][0] | if . == null then "Unknown" elif .status == "True" then "True" elif .status == "False" then "False" else "Unknown" end' /tmp/run)
+          [ "$status" = Unknown ] || break
+          [ "$(date +%s)" -lt "$deadline" ] || { echo "$run did not finish within $(params.WAIT_TIMEOUT)s"; exit 1; }
+          sleep 5
+        done
+        [ "$status" = True ] || { echo "$run failed: $(jq -r '[.status.conditions[]? | select(.type == "Succeeded")][0] | "\(.reason): \(.message)"' /tmp/run)"; exit 1; }
+        value=""
+        if [ -n "$(params.RESULT)" ]; then
+          value=$(jq -r --arg r "$(params.RESULT)" '[.status.results[]? | select(.name == $r) | .value][0] // empty' /tmp/run)
+          [ -n "$value" ] || { echo "$run succeeded without the result $(params.RESULT)"; exit 1; }
+        fi
+        printf '%s' "$value" > "$(results.VALUE.path)"
+        echo "$run succeeded${value:+: $(params.RESULT)=$value}"

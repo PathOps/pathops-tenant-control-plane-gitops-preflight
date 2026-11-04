@@ -1,0 +1,43 @@
+# VERIFY_ROLLOUT (Decision 0051): the preflight runtime runs the candidate.
+# Every Pod of the Deployment runs exactly the candidate tag, the digest behind
+# it (its imageID) and is Ready; optionally the public health endpoint answers
+# {"status":"ok"}. Read-only.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: verify-rollout}
+spec:
+  params:
+    - {name: NAMESPACE, default: pathops-tenant-control-plane-preflight}
+    - {name: IMAGE, description: candidate tag reference}
+    - {name: DIGEST, description: candidate digest}
+    - {name: HEALTH_URL, default: "", description: "HTTPS health URL to check (empty: skip)"}
+  volumes:
+    - {name: cell-ca, configMap: {name: cell-ca}}
+  steps:
+    - name: verify
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts: [{name: cell-ca, mountPath: /etc/pathops/cell-ca, readOnly: true}]
+      script: |
+        #!/bin/sh
+        set -eu
+        ns=$(params.NAMESPACE)
+        kubectl -n "$ns" rollout status deploy/tenant-control-plane --timeout=300s
+        pods=$(kubectl -n "$ns" get pods -l app.kubernetes.io/name=tenant-control-plane -o json)
+        echo "$pods" | jq -e --arg img "$(params.IMAGE)" --arg dig "$(params.DIGEST)" '
+          [.items[] | select(.metadata.deletionTimestamp == null)] as $p
+          | ($p | length) > 0 and
+            ($p | all(.spec.containers[0].image == $img
+                      and (.status.containerStatuses[0].imageID | endswith("@" + $dig))
+                      and .status.containerStatuses[0].ready))' >/dev/null \
+          || { echo "$ns Pods do not all run $(params.IMAGE) = $(params.DIGEST)"
+               echo "$pods" | jq -r '.items[] | "\(.metadata.name) \(.spec.containers[0].image) \(.status.containerStatuses[0].imageID) ready=\(.status.containerStatuses[0].ready)"'
+               exit 1; }
+        echo "$ns runs $(params.IMAGE) = $(params.DIGEST)"
+        if [ -n "$(params.HEALTH_URL)" ]; then
+          # Same public name as browsers; in-cluster CoreDNS sends it to the Cell Traefik.
+          body=$(curl -sS --fail --cacert /etc/pathops/cell-ca/ca.crt "$(params.HEALTH_URL)")
+          [ "$(echo "$body" | jq -c .)" = '{"status":"ok"}' ] || { echo "unexpected health body: $body"; exit 1; }
+          echo "$(params.HEALTH_URL) -> $body"
+        fi

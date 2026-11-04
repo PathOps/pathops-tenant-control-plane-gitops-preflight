@@ -1,0 +1,144 @@
+# PROMOTE_RELEASE (Decisions 0045, 0051): publish the exact tested candidate.
+# No rebuild, no deployment, and no registry credential in the Cell.
+#
+#   verify   the candidate in zot is exactly what preflight tested: its tag's
+#            manifest is DIGEST (bytes checked), labeled with COMMIT; the test
+#            image's tag is TESTS_DIGEST
+#   clone    CLONE_GITOPS (current HEAD, with tags)
+#   tag      the annotated release tag release/<IMAGE_REVISION> on the GitOps
+#            commit whose integration-test run passed (an ancestor of HEAD),
+#            its message the release candidate (JSON). Absent: created and
+#            pushed. Present with the same candidate: adopted. Present with
+#            anything else: conflict, fail closed; a release tag never moves.
+#   publish  Forgejo's push mirror carries the tag to GitHub, where the
+#            workflow .github/workflows/promote-release.yml copies the zot
+#            manifest and blobs to ghcr.io/pathops/pathops-tenant-control-plane:
+#            <IMAGE_REVISION> with digest preservation (GITHUB_TOKEN of that
+#            run only) and attests its provenance. This step waits until GHCR
+#            serves the tag, anonymously, and requires exactly DIGEST.
+#
+# Result RELEASE: the published release (JSON) for INSTALL_CANARY. A failure
+# leaves no release for canary.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: promote-release}
+spec:
+  params:
+    - {name: COMMIT}
+    - {name: IMAGE_REVISION}
+    - {name: DIGEST, description: candidate digest (zot)}
+    - {name: TESTS_DIGEST}
+    - {name: GITOPS_COMMIT, description: the GitOps commit whose integration-test run passed}
+    - {name: TEST_JOB}
+    - {name: TESTS_RUN, description: the RUN_PREFLIGHT_TESTS run that passed}
+    - {name: RELEASE_IMAGE, default: ghcr.io/pathops/pathops-tenant-control-plane}
+    - {name: PUBLISH_TIMEOUT, default: "900", description: seconds to wait for GHCR to serve the tag}
+  results:
+    - {name: RELEASE, description: "the release (JSON, schemaVersion 1)"}
+    - {name: ADOPTED, description: "true if the release tag already existed for this candidate"}
+  volumes:
+    - {name: gitops, emptyDir: {}}
+    - {name: gitops-key, secret: {secretName: tenant-cp-gitops-preflight-write, defaultMode: 0440}}
+    - {name: cell-ca, configMap: {name: cell-ca}}
+  steps:
+    - name: verify
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: &restricted {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts:
+        - {name: gitops, mountPath: /work}
+        - {name: cell-ca, mountPath: /etc/pathops/cell-ca, readOnly: true}
+      script: |
+        #!/bin/sh
+        set -eu
+        commit=$(params.COMMIT); rev=$(params.IMAGE_REVISION)
+        printf '%s' "$commit" | grep -Eqx '[0-9a-f]{40}' && [ "$rev" = "$(printf '%s' "$commit" | cut -c1-12)" ] \
+          || { echo "revision $rev is not derived from $commit"; exit 1; }
+        accept='application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+        check() { # repo tag digest: the tag's manifest is exactly digest
+          code=$(curl -sS --cacert /etc/pathops/cell-ca/ca.crt -H "Accept: $accept" -o /tmp/m.json -D /tmp/h -w '%{http_code}' \
+            "https://${ZOT_HOST}/v2/$1/manifests/$2")
+          [ "$code" = 200 ] || { echo "$1:$2 is not in zot (HTTP $code)"; exit 1; }
+          got=$(tr -d '\r' < /tmp/h | awk 'tolower($1) == "docker-content-digest:" {print $2}')
+          [ "$got" = "$3" ] && [ "sha256:$(sha256sum < /tmp/m.json | cut -d' ' -f1)" = "$3" ] \
+            || { echo "artifact-integrity: $1:$2 is $got, not the tested $3"; exit 1; }
+        }
+        check pathops/tenant-control-plane "$rev" "$(params.DIGEST)"
+        config=$(jq -r '.config.digest' /tmp/m.json)
+        label=$(curl -sS --fail --cacert /etc/pathops/cell-ca/ca.crt "https://${ZOT_HOST}/v2/pathops/tenant-control-plane/blobs/$config" \
+          | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')
+        [ "$label" = "$commit" ] || { echo "artifact-integrity: the candidate is labeled '$label', not $commit"; exit 1; }
+        check pathops/tenant-control-plane-integration-tests "$rev" "$(params.TESTS_DIGEST)"
+        jq -cn --arg c "$commit" --arg r "$rev" --arg z "${ZOT_HOST}/pathops/tenant-control-plane" --arg d "$(params.DIGEST)" \
+          --arg tz "${ZOT_HOST}/pathops/tenant-control-plane-integration-tests" --arg td "$(params.TESTS_DIGEST)" \
+          --arg g "$(params.GITOPS_COMMIT)" --arg j "$(params.TEST_JOB)" --arg run "$(params.TESTS_RUN)" --arg img "$(params.RELEASE_IMAGE)" \
+          '{schemaVersion: 1, kind: "TenantControlPlaneRelease", sourceCommit: $c, imageRevision: $r,
+            candidate: {repository: $z, tag: $r, digest: $d},
+            tests: {repository: $tz, tag: $r, digest: $td, job: $j, pipelineRun: $run, gitopsCommit: $g, result: "passed"},
+            release: {image: $img, tag: $r, digest: $d}}' > /work/release.json
+        echo "the tested candidate: $(cat /work/release.json)"
+    - name: clone
+      ref: {name: clone-gitops}
+    - name: tag
+      image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      securityContext: *restricted
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts:
+        - {name: gitops, mountPath: /work}
+        - {name: gitops-key, mountPath: /pathops/key, readOnly: true}
+      script: |
+        #!/bin/sh
+        set -eu
+        cd /work/gitops
+        tag="release/$(params.IMAGE_REVISION)"
+        if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+          [ "$(git cat-file -t "refs/tags/$tag")" = tag ] || { echo "conflict: $tag exists and is not an annotated release tag"; exit 1; }
+          existing=$(git for-each-ref --format='%(contents)' "refs/tags/$tag" | sed -n '/^{/p')
+          want=$(sed -n 's/.*"sourceCommit":"\([0-9a-f]*\)".*/\1/p' /work/release.json)
+          have=$(printf '%s' "$existing" | sed -n 's/.*"sourceCommit":"\([0-9a-f]*\)".*/\1/p')
+          wd=$(sed -n 's/.*"candidate":{[^}]*"digest":"\(sha256:[0-9a-f]*\)".*/\1/p' /work/release.json)
+          hd=$(printf '%s' "$existing" | sed -n 's/.*"candidate":{[^}]*"digest":"\(sha256:[0-9a-f]*\)".*/\1/p')
+          [ -n "$have" ] && [ "$have" = "$want" ] && [ -n "$hd" ] && [ "$hd" = "$wd" ] \
+            || { echo "conflict: $tag already names source $have digest $hd, not $want $wd; a release tag never moves"; exit 1; }
+          printf true > /work/adopted
+          echo "$tag already exists for this candidate: adopted"
+          exit 0
+        fi
+        git merge-base --is-ancestor "$(params.GITOPS_COMMIT)" HEAD \
+          || { echo "$(params.GITOPS_COMMIT) is not in the preflight GitOps history"; exit 1; }
+        { printf 'release tenant control plane %s\n\n' "$(params.IMAGE_REVISION)"; cat /work/release.json; } > /tmp/message
+        git -c user.name="PathOps bootstrap pipeline" -c user.email="bootstrap-pipeline@demo.pathops.io" \
+          tag -a "$tag" -F /tmp/message "$(params.GITOPS_COMMIT)"
+        install -m 0600 /pathops/key/identity /tmp/git-identity
+        GIT_SSH_COMMAND="ssh -i /tmp/git-identity -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/pathops/key/known_hosts" \
+          git push --quiet origin "refs/tags/$tag"
+        printf false > /work/adopted
+        echo "created and pushed $tag on $(params.GITOPS_COMMIT)"
+    - name: publish
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: *restricted
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts: [{name: gitops, mountPath: /work}]
+      script: |
+        #!/bin/sh
+        set -eu
+        image=$(params.RELEASE_IMAGE); rev=$(params.IMAGE_REVISION); digest=$(params.DIGEST)
+        repo=${image#ghcr.io/}
+        accept='application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+        deadline=$(( $(date +%s) + $(params.PUBLISH_TIMEOUT) ))
+        while :; do
+          # Anonymous, like a node pulling the release.
+          token=$(curl -sS --fail "https://ghcr.io/token?scope=repository:$repo:pull" | jq -r .token)
+          printf 'Authorization: Bearer %s\n' "$token" > /tmp/ghcr-auth
+          code=$(curl -sS -H @/tmp/ghcr-auth -H "Accept: $accept" -o /tmp/m.json -D /tmp/h -w '%{http_code}' \
+            "https://ghcr.io/v2/$repo/manifests/$rev" || echo 000)
+          [ "$code" = 200 ] && break
+          [ "$(date +%s)" -lt "$deadline" ] || { echo "GHCR does not serve $image:$rev after $(params.PUBLISH_TIMEOUT)s (last HTTP $code): see the promote-release workflow of the GitHub mirror"; exit 1; }
+          sleep 15
+        done
+        got=$(tr -d '\r' < /tmp/h | awk 'tolower($1) == "docker-content-digest:" {print $2}')
+        [ "$got" = "$digest" ] && [ "sha256:$(sha256sum < /tmp/m.json | cut -d' ' -f1)" = "$digest" ] \
+          || { echo "artifact-integrity: $image:$rev is $got, not the tested candidate $digest: no release"; exit 1; }
+        jq -c . /work/release.json > "$(results.RELEASE.path)"
+        cat /work/adopted > "$(results.ADOPTED.path)"
+        echo "released $image:$rev = $digest (the tested candidate, same digest)"

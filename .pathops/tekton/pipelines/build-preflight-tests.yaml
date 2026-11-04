@@ -1,0 +1,32 @@
+# BUILD_PREFLIGHT_TESTS (Decisions 0051, 0052), namespace
+# pathops-tenant-control-plane-tekton-build. Requested (and awaited) by
+# RUN_PREFLIGHT_TESTS for the candidate under test.
+#
+#   clone-source           CLONE_SOURCE (the source repository's Task):
+#                          current source HEAD (GENERAL)
+#   build-preflight-tests  BUILD: HEAD must be the candidate's commit, else
+#                          fail closed; the integration-test image
+#                          :<revision>, created once or adopted; its digest
+#
+# BUILD + source read + test-image/cache write; no GitOps authority.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata: {name: tenant-control-plane-build-preflight-tests, namespace: pathops-tenant-control-plane-tekton-build}
+spec:
+  params:
+    - {name: commit, description: full source commit of the candidate under test}
+    - {name: revision, description: its 12-character revision}
+  results:
+    - {name: source-head, value: $(tasks.clone-source.results.COMMIT)}
+    - {name: tests-digest, value: $(tasks.build-preflight-tests.results.DIGEST)}
+    - {name: tests-adopted, value: $(tasks.build-preflight-tests.results.ADOPTED)}
+    - {name: cache, value: $(tasks.build-preflight-tests.results.CACHE)}
+  tasks:
+    - name: clone-source
+      taskRef: {name: clone-source}
+    - name: build-preflight-tests
+      taskRef: {name: build-preflight-tests}
+      params:
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: CLONED, value: $(tasks.clone-source.results.COMMIT)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}

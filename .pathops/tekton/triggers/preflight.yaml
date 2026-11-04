@@ -1,0 +1,232 @@
+# The preflight stage's entry points in the dev bootstrap's internal HTTP
+# chain (Decision 0051): authenticated stage requests (core "gitlab"
+# ClusterInterceptor: the shared stage token in X-Gitlab-Token and the event in
+# X-Gitlab-Event), each body validated by CEL. The Tenant Control Plane cannot
+# orchestrate the delivery that builds itself; in a normal Cell it does.
+#
+#   tekton-preflight  EventListener tenant-control-plane-preflight:
+#                     deploy-preflight     (from BUILD_AND_PUSH)
+#                     run-preflight-tests  (from DEPLOY_PREFLIGHT)
+#                     promote-release      (from RUN_PREFLIGHT_TESTS)
+#                     token: Secret tenant-cp-preflight-trigger
+#   tekton-build      Trigger build-preflight-tests (from RUN_PREFLIGHT_TESTS),
+#                     served by the source repository's EventListener
+#                     tenant-control-plane-build through its label selector;
+#                     token: Secret tenant-cp-build-trigger
+#
+# Execution roles (Decision 0052) are materialized by these TriggerTemplates,
+# the PipelineRuns' creators: the preflight pipelines are GENERAL, as
+# tenant-control-plane-preflight; in BUILD_PREFLIGHT_TESTS, clone-source is
+# GENERAL (tenant-control-plane-ci) and build-preflight-tests runs with BUILD
+# as tenant-control-plane-test-build.
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata: {name: tenant-control-plane-stage-request, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit, value: $(body.commit)}
+    - {name: revision, value: $(body.revision)}
+    - {name: digest, value: $(body.digest)}
+    - {name: tests-digest, value: $(body.testsDigest)}
+    - {name: gitops-commit, value: $(body.gitopsCommit)}
+    - {name: test-job, value: $(body.testJob)}
+    - {name: health-path, value: $(body.healthPath)}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata: {name: tenant-control-plane-deploy-preflight, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+    - {name: digest}
+    - {name: health-path, default: /healthz}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata: {generateName: tenant-control-plane-deploy-preflight-}
+      spec:
+        pipelineRef: {name: tenant-control-plane-deploy-preflight}
+        params:
+          - {name: commit, value: $(tt.params.commit)}
+          - {name: revision, value: $(tt.params.revision)}
+          - {name: digest, value: $(tt.params.digest)}
+          - {name: health-path, value: $(tt.params.health-path)}
+        timeouts: {pipeline: 30m}
+        taskRunTemplate:
+          serviceAccountName: tenant-control-plane-preflight
+          podTemplate:
+            securityContext: {runAsNonRoot: true, fsGroup: 65534, seccompProfile: {type: RuntimeDefault}}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata: {name: tenant-control-plane-run-preflight-tests, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+    - {name: digest}
+    - {name: health-path, default: /healthz}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata: {generateName: tenant-control-plane-run-preflight-tests-}
+      spec:
+        pipelineRef: {name: tenant-control-plane-run-preflight-tests}
+        params:
+          - {name: commit, value: $(tt.params.commit)}
+          - {name: revision, value: $(tt.params.revision)}
+          - {name: digest, value: $(tt.params.digest)}
+          - {name: health-path, value: $(tt.params.health-path)}
+        timeouts: {pipeline: 60m}
+        taskRunTemplate:
+          serviceAccountName: tenant-control-plane-preflight
+          podTemplate:
+            securityContext: {runAsNonRoot: true, fsGroup: 65534, seccompProfile: {type: RuntimeDefault}}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata: {name: tenant-control-plane-promote-release, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+    - {name: digest}
+    - {name: tests-digest}
+    - {name: gitops-commit}
+    - {name: test-job}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata: {generateName: tenant-control-plane-promote-release-}
+      spec:
+        pipelineRef: {name: tenant-control-plane-promote-release}
+        params:
+          - {name: commit, value: $(tt.params.commit)}
+          - {name: revision, value: $(tt.params.revision)}
+          - {name: digest, value: $(tt.params.digest)}
+          - {name: tests-digest, value: $(tt.params.tests-digest)}
+          - {name: gitops-commit, value: $(tt.params.gitops-commit)}
+          - {name: test-job, value: $(tt.params.test-job)}
+        timeouts: {pipeline: 30m}
+        taskRunTemplate:
+          serviceAccountName: tenant-control-plane-preflight
+          podTemplate:
+            securityContext: {runAsNonRoot: true, fsGroup: 65534, seccompProfile: {type: RuntimeDefault}}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata: {name: tenant-control-plane-preflight, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  serviceAccountName: tenant-control-plane-trigger
+  triggers:
+    - name: deploy-preflight
+      interceptors:
+        - ref: {name: gitlab, kind: ClusterInterceptor}
+          params:
+            - {name: secretRef, value: {secretName: tenant-cp-preflight-trigger, secretKey: token}}
+            - {name: eventTypes, value: [deploy-preflight]}
+        - ref: {name: cel, kind: ClusterInterceptor}
+          params:
+            - name: filter
+              value: >-
+                body.revision.matches('^[0-9a-f]{12}$') && body.commit.matches('^[0-9a-f]{40}$') &&
+                body.commit.startsWith(body.revision) && body.digest.matches('^sha256:[0-9a-f]{64}$')
+      bindings: [{ref: tenant-control-plane-stage-request}]
+      template: {ref: tenant-control-plane-deploy-preflight}
+    - name: run-preflight-tests
+      interceptors:
+        - ref: {name: gitlab, kind: ClusterInterceptor}
+          params:
+            - {name: secretRef, value: {secretName: tenant-cp-preflight-trigger, secretKey: token}}
+            - {name: eventTypes, value: [run-preflight-tests]}
+        - ref: {name: cel, kind: ClusterInterceptor}
+          params:
+            - name: filter
+              value: >-
+                body.revision.matches('^[0-9a-f]{12}$') && body.commit.matches('^[0-9a-f]{40}$') &&
+                body.commit.startsWith(body.revision) && body.digest.matches('^sha256:[0-9a-f]{64}$')
+      bindings: [{ref: tenant-control-plane-stage-request}]
+      template: {ref: tenant-control-plane-run-preflight-tests}
+    - name: promote-release
+      interceptors:
+        - ref: {name: gitlab, kind: ClusterInterceptor}
+          params:
+            - {name: secretRef, value: {secretName: tenant-cp-preflight-trigger, secretKey: token}}
+            - {name: eventTypes, value: [promote-release]}
+        - ref: {name: cel, kind: ClusterInterceptor}
+          params:
+            - name: filter
+              value: >-
+                body.revision.matches('^[0-9a-f]{12}$') && body.commit.matches('^[0-9a-f]{40}$') &&
+                body.commit.startsWith(body.revision) && body.digest.matches('^sha256:[0-9a-f]{64}$') &&
+                body.testsDigest.matches('^sha256:[0-9a-f]{64}$') && body.gitopsCommit.matches('^[0-9a-f]{40}$') &&
+                body.testJob.matches('^tenant-control-plane-run-preflight-tests-[a-z0-9]{5}$')
+      bindings: [{ref: tenant-control-plane-stage-request}]
+      template: {ref: tenant-control-plane-promote-release}
+  resources:
+    kubernetesResource:
+      spec:
+        template:
+          spec:
+            securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+            containers:
+              - resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata: {name: tenant-control-plane-stage-request, namespace: pathops-tenant-control-plane-tekton-build}
+spec:
+  params:
+    - {name: commit, value: $(body.commit)}
+    - {name: revision, value: $(body.revision)}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata: {name: tenant-control-plane-build-preflight-tests, namespace: pathops-tenant-control-plane-tekton-build}
+spec:
+  params:
+    - {name: commit}
+    - {name: revision}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata: {generateName: tenant-control-plane-build-preflight-tests-}
+      spec:
+        pipelineRef: {name: tenant-control-plane-build-preflight-tests}
+        params:
+          - {name: commit, value: $(tt.params.commit)}
+          - {name: revision, value: $(tt.params.revision)}
+        timeouts: {pipeline: 30m}
+        taskRunTemplate:
+          serviceAccountName: tenant-control-plane-ci
+          podTemplate:
+            securityContext: {runAsNonRoot: true, fsGroup: 65534, seccompProfile: {type: RuntimeDefault}}
+        taskRunSpecs:
+          - pipelineTaskName: build-preflight-tests
+            serviceAccountName: tenant-control-plane-test-build
+            podTemplate:
+              nodeSelector: {pathops.io/node-role: build}
+              tolerations: [{key: pathops.io/node-role, operator: Equal, value: build, effect: NoSchedule}]
+              hostUsers: false
+              automountServiceAccountToken: false
+              securityContext: {fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: Trigger
+metadata:
+  name: build-preflight-tests
+  namespace: pathops-tenant-control-plane-tekton-build
+  labels: {pathops.io/event-listener: tenant-control-plane-build}
+spec:
+  interceptors:
+    - ref: {name: gitlab, kind: ClusterInterceptor}
+      params:
+        - {name: secretRef, value: {secretName: tenant-cp-build-trigger, secretKey: token}}
+        - {name: eventTypes, value: [build-preflight-tests]}
+    - ref: {name: cel, kind: ClusterInterceptor}
+      params:
+        - name: filter
+          value: "body.revision.matches('^[0-9a-f]{12}$') && body.commit.matches('^[0-9a-f]{40}$') && body.commit.startsWith(body.revision)"
+  bindings: [{ref: tenant-control-plane-stage-request}]
+  template: {ref: tenant-control-plane-build-preflight-tests}

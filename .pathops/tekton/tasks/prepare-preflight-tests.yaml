@@ -1,0 +1,90 @@
+# PREPARE_PREFLIGHT_TESTS (Decision 0051): put one integration-test run in the
+# preflight desired state: a Job with a fresh name (one per RUN_PREFLIGHT_TESTS
+# run) that runs the test image built for the candidate's revision.
+#
+#   clone  CLONE_GITOPS (current HEAD)
+#   job    integration-test.yaml: the Job; images[...-integration-tests] =
+#          the revision tag; the test image's digest recorded as an annotation
+#          (WAIT_PREFLIGHT_TESTS checks the Pod ran exactly it)
+#   push   PUSH_GITOPS
+#
+# Flux materializes the Job in the preflight namespace and prunes the previous
+# run's Job. The Job logs in at the Cell's real Dex as the preflight test user:
+# Secret tenant-cp-preflight-login (username, password) and the Cell CA
+# (ConfigMap tenant-control-plane-cell-ca) are provided by the Cell bootstrap,
+# never by this repository.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: prepare-preflight-tests}
+spec:
+  params:
+    - {name: COMMIT, description: full source commit of the candidate}
+    - {name: IMAGE_REVISION}
+    - {name: TESTS_DIGEST, description: digest of the integration-test image built for IMAGE_REVISION}
+    - {name: JOB_NAME, description: fresh Job name for this run}
+    - {name: TARGET_URL, default: "http://tenant-control-plane.pathops-tenant-control-plane-preflight.svc.cluster.local:8080"}
+    - {name: HEALTH_PATH, default: /healthz, description: probed path (fault injection only)}
+    - {name: PIPELINE_RUN}
+  results:
+    - {name: GITOPS_COMMIT, value: $(steps.push.results.COMMIT)}
+  volumes:
+    - {name: gitops, emptyDir: {}}
+    - {name: gitops-key, secret: {secretName: tenant-cp-gitops-preflight-write, defaultMode: 0440}}
+  steps:
+    - name: clone
+      ref: {name: clone-gitops}
+    - name: job
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts: [{name: gitops, mountPath: /work}]
+      script: |
+        #!/bin/sh
+        set -eu
+        commit=$(params.COMMIT); rev=$(params.IMAGE_REVISION); digest=$(params.TESTS_DIGEST); job=$(params.JOB_NAME)
+        [ "$rev" = "$(printf '%s' "$commit" | cut -c1-12)" ] && printf '%s' "$rev" | grep -Eqx '[0-9a-f]{12}' \
+          || { echo "revision $rev is not derived from $commit"; exit 1; }
+        printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "not a digest: $digest"; exit 1; }
+        printf '%s' "$job" | grep -Eqx '[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?' || { echo "invalid Job name: $job"; exit 1; }
+        image="${ZOT_HOST}/pathops/tenant-control-plane-integration-tests:$rev"
+        cd /work/gitops
+        cat > integration-test.yaml <<JOB
+        # One integration-test run, written by PREPARE_PREFLIGHT_TESTS ($(params.PIPELINE_RUN)).
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: $job
+          labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "$rev"}
+          annotations: {pathops.io/source-commit: "$commit", pathops.io/tests-digest: "$digest"}
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 300
+          template:
+            metadata:
+              labels: {app.kubernetes.io/name: tenant-control-plane-tests}
+            spec:
+              restartPolicy: Never
+              automountServiceAccountToken: false
+              securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+              containers:
+                - name: tests
+                  image: tenant-control-plane-integration-tests
+                  env:
+                    - {name: CP_BASE_URL, value: "$(params.TARGET_URL)"}
+                    - {name: CP_HEALTH_PATH, value: "$(params.HEALTH_PATH)"}
+                    - {name: CP_REQUIRE_LOGIN, value: "1"}
+                    - {name: CP_LOGIN_USERNAME, valueFrom: {secretKeyRef: {name: tenant-cp-preflight-login, key: username}}}
+                    - {name: CP_LOGIN_PASSWORD, valueFrom: {secretKeyRef: {name: tenant-cp-preflight-login, key: password}}}
+                    - {name: CP_OIDC_CA_FILE, value: /etc/pathops/cell-ca/ca.crt}
+                  volumeMounts: [{name: cell-ca, mountPath: /etc/pathops/cell-ca, readOnly: true}]
+                  securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+                  resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+              volumes: [{name: cell-ca, configMap: {name: tenant-control-plane-cell-ca}}]
+        JOB
+        grep -qx -- "- integration-test.yaml" kustomization.yaml || kustomize edit add resource integration-test.yaml
+        kustomize edit set image "tenant-control-plane-integration-tests=$image"
+        kustomize build . >/dev/null
+        printf 'run preflight tests for tenant control plane %s\n\njob: %s\ntests image: %s\ntests digest: %s\nsource: %s\npipelinerun: %s\n' \
+          "$rev" "$job" "$image" "$digest" "$commit" "$(params.PIPELINE_RUN)" > /work/message
+    - name: push
+      ref: {name: push-gitops}

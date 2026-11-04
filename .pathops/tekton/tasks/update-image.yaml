@@ -1,0 +1,47 @@
+# UPDATE_IMAGE (Decisions 0043, 0051): set the preflight Tenant Control Plane
+# image to the immutable candidate tag and push the desired state.
+#
+#   clone   CLONE_GITOPS (current HEAD)
+#   update  images[tenant-control-plane].newTag = IMAGE_REVISION (never a
+#           digest, never an environment tag); the candidate's digest goes in
+#           the commit message as integrity metadata; the result must render
+#   push    PUSH_GITOPS
+#
+# Desired state only: Flux deploys it. Runs as tenant-control-plane-preflight
+# (GENERAL), whose only Git authority is this repository's write key.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: update-image}
+spec:
+  params:
+    - {name: COMMIT, description: full source commit of the candidate}
+    - {name: IMAGE_REVISION, description: first 12 characters of COMMIT}
+    - {name: DIGEST, description: digest of the candidate tag}
+    - {name: PIPELINE_RUN}
+  results:
+    - {name: GITOPS_COMMIT, value: $(steps.push.results.COMMIT)}
+  volumes:
+    - {name: gitops, emptyDir: {}}
+    - {name: gitops-key, secret: {secretName: tenant-cp-gitops-preflight-write, defaultMode: 0440}}
+  steps:
+    - name: clone
+      ref: {name: clone-gitops}
+    - name: update
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      volumeMounts: [{name: gitops, mountPath: /work}]
+      script: |
+        #!/bin/sh
+        set -eu
+        commit=$(params.COMMIT); rev=$(params.IMAGE_REVISION); digest=$(params.DIGEST)
+        printf '%s' "$commit" | grep -Eqx '[0-9a-f]{40}' || { echo "not a full commit: $commit"; exit 1; }
+        [ "$rev" = "$(printf '%s' "$commit" | cut -c1-12)" ] || { echo "revision $rev is not derived from $commit"; exit 1; }
+        printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "not a digest: $digest"; exit 1; }
+        cd /work/gitops
+        kustomize edit set image "tenant-control-plane=${ZOT_HOST}/pathops/tenant-control-plane:$rev"
+        kustomize build . >/dev/null
+        printf 'deploy preflight tenant control plane %s\n\nimage: %s\ndigest: %s\nsource: %s\npipelinerun: %s\n' \
+          "$rev" "${ZOT_HOST}/pathops/tenant-control-plane:$rev" "$digest" "$commit" "$(params.PIPELINE_RUN)" > /work/message
+    - name: push
+      ref: {name: push-gitops}

@@ -1,0 +1,102 @@
+# PROMOTE_RELEASE publication (Decisions 0045, 0051). The dev Cell's
+# PROMOTE_RELEASE pipeline pushes the annotated tag release/<revision> to this
+# repository in Forgejo; the one-way push mirror brings it here. This workflow
+# copies the exact tested candidate from the dev Cell's zot (anonymous public
+# read) to GHCR with digest preservation and attests its provenance. The Cell
+# holds no GHCR credential: only this run's GITHUB_TOKEN writes the package.
+#
+# A release tag never moves: if GHCR already has the tag with the candidate's
+# digest it is adopted; any other digest fails the run (and PROMOTE_RELEASE,
+# which waits for the exact digest, fails too).
+name: promote-release
+
+on:
+  push:
+    tags: ["release/*"]
+
+permissions: {}
+
+concurrency:
+  group: promote-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_IMAGE: ghcr.io/pathops/pathops-tenant-control-plane
+      CANDIDATE_REGISTRY: zot-dev.demo.pathops.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the release candidate from the tag
+        id: candidate
+        run: |
+          set -euo pipefail
+          git fetch --force origin "+${GITHUB_REF}:${GITHUB_REF}"
+          [ "$(git cat-file -t "$GITHUB_REF")" = tag ] || { echo "::error::$GITHUB_REF is not an annotated tag"; exit 1; }
+          git for-each-ref --format='%(contents)' "$GITHUB_REF" | sed -n '/^{/p' > release.json
+          rev=${GITHUB_REF_NAME#release/}
+          jq -e --arg r "$rev" --arg z "$CANDIDATE_REGISTRY/pathops/tenant-control-plane" --arg img "$RELEASE_IMAGE" '
+            .schemaVersion == 1 and .kind == "TenantControlPlaneRelease" and .imageRevision == $r
+            and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.sourceCommit | startswith($r))
+            and .candidate.repository == $z and .candidate.tag == $r and (.candidate.digest | test("^sha256:[0-9a-f]{64}$"))
+            and .tests.result == "passed" and .release.image == $img and .release.tag == $r and .release.digest == .candidate.digest' \
+            release.json >/dev/null || { echo "::error::the tag message is not a release candidate for $rev"; cat release.json; exit 1; }
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "digest=$(jq -r .candidate.digest release.json)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(jq -r .sourceCommit release.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Copy the tested candidate to GHCR (same digest)
+        id: copy
+        env:
+          REV: ${{ steps.candidate.outputs.revision }}
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+          COMMIT: ${{ steps.candidate.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          src="docker://$CANDIDATE_REGISTRY/pathops/tenant-control-plane@$DIGEST"
+          dst="docker://$RELEASE_IMAGE:$REV"
+          # The candidate: exactly the digest, labeled with the source commit.
+          skopeo inspect --raw "$src" > manifest.json
+          [ "sha256:$(sha256sum < manifest.json | cut -d' ' -f1)" = "$DIGEST" ] || { echo "::error::the candidate bytes are not $DIGEST"; exit 1; }
+          label=$(skopeo inspect --config "$src" | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""')
+          [ "$label" = "$COMMIT" ] || { echo "::error::the candidate is labeled $label, not $COMMIT"; exit 1; }
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          if existing=$(skopeo inspect --format '{{.Digest}}' "$dst" 2>/dev/null); then
+            [ "$existing" = "$DIGEST" ] || { echo "::error::$RELEASE_IMAGE:$REV already is $existing, not $DIGEST; a release never moves"; exit 1; }
+            echo "adopted=true" >> "$GITHUB_OUTPUT"
+            echo "$RELEASE_IMAGE:$REV already is $DIGEST: adopted"
+          else
+            skopeo copy --preserve-digests "$src" "$dst"
+            echo "adopted=false" >> "$GITHUB_OUTPUT"
+          fi
+          got=$(skopeo inspect --format '{{.Digest}}' "$dst")
+          [ "$got" = "$DIGEST" ] || { echo "::error::$RELEASE_IMAGE:$REV is $got, not $DIGEST"; exit 1; }
+          skopeo logout ghcr.io >/dev/null || true
+          {
+            echo "### Released $RELEASE_IMAGE:$REV"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| source | \`$COMMIT\` |"
+            echo "| digest | \`$DIGEST\` (the tested zot candidate, preserved) |"
+            echo "| pin | \`$RELEASE_IMAGE@$DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.RELEASE_IMAGE }}
+          subject-digest: ${{ steps.candidate.outputs.digest }}
+          push-to-registry: true

@@ -1,0 +1,39 @@
+# FLUX_RECONCILE (Decision 0051): ask Flux to reconcile now and wait until it
+# has applied a GitOps commit and is Ready. Flux controllers run in
+# flux-system; this repository's GitRepository and Kustomization live in
+# pathops-tenant-control-plane-flux-preflight. Annotations only: never applies
+# a resource itself.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: flux-reconcile}
+spec:
+  params:
+    - {name: FLUX_NAMESPACE, default: pathops-tenant-control-plane-flux-preflight}
+    - {name: GITREPOSITORY, default: pathops-tenant-control-plane-gitops-preflight}
+    - {name: KUSTOMIZATION, default: tenant-control-plane}
+    - {name: GITOPS_COMMIT}
+  steps:
+    - name: reconcile
+      image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+      env: [{name: HOME, value: /tmp}]
+      script: |
+        #!/bin/sh
+        set -eu
+        ns=$(params.FLUX_NAMESPACE); ks=$(params.KUSTOMIZATION)
+        now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        kubectl -n "$ns" annotate --overwrite "gitrepository/$(params.GITREPOSITORY)" reconcile.fluxcd.io/requestedAt="$now" >/dev/null
+        kubectl -n "$ns" annotate --overwrite "kustomization/$ks" reconcile.fluxcd.io/requestedAt="$now" >/dev/null
+        i=0
+        until kubectl -n "$ns" get "kustomization/$ks" -o json | jq -e --arg c "$(params.GITOPS_COMMIT)" '
+            (.status.lastAppliedRevision // "" | endswith($c)) and
+            ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length > 0)' >/dev/null; do
+          i=$((i + 1))
+          if [ "$i" -gt 120 ]; then
+            echo "Flux did not apply $(params.GITOPS_COMMIT) in $ns/$ks"
+            kubectl -n "$ns" get "kustomization/$ks" -o yaml | sed -n '/^status:/,$p'
+            exit 1
+          fi
+          sleep 5
+        done
+        echo "Flux applied $(params.GITOPS_COMMIT) ($ns/$ks)"

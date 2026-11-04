@@ -1,0 +1,54 @@
+# DEPLOY_PREFLIGHT (Decision 0051), namespace pathops-tenant-control-plane-tekton-preflight.
+# Requested by BUILD_AND_PUSH for one candidate (commit, revision tag, digest).
+#
+#   update-image        CLONE_GITOPS -> UPDATE_IMAGE (candidate tag) -> PUSH_GITOPS
+#   flux-reconcile      FLUX_RECONCILE: Flux applied that GitOps commit
+#   verify-rollout      VERIFY_ROLLOUT: every Pod runs the candidate digest; the
+#                       public endpoint answers
+#   request-tests       REQUEST_STAGE: RUN_PREFLIGHT_TESTS of the candidate
+#
+# Git is the desired state and Flux deploys it: no Tekton apply of runtime
+# resources. GENERAL; preflight GitOps write only.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata: {name: tenant-control-plane-deploy-preflight, namespace: pathops-tenant-control-plane-tekton-preflight}
+spec:
+  params:
+    - {name: commit, description: full source commit of the candidate}
+    - {name: revision, description: candidate tag (first 12 characters of commit)}
+    - {name: digest, description: candidate digest}
+    - {name: health-path, default: /healthz, description: preflight probe path, passed on (fault injection only)}
+  results:
+    - {name: gitops-commit, value: $(tasks.update-image.results.GITOPS_COMMIT)}
+  tasks:
+    - name: update-image
+      taskRef: {name: update-image}
+      params:
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: DIGEST, value: $(params.digest)}
+        - {name: PIPELINE_RUN, value: $(context.pipelineRun.name)}
+    - name: flux-reconcile
+      taskRef: {name: flux-reconcile}
+      params:
+        - {name: GITOPS_COMMIT, value: $(tasks.update-image.results.GITOPS_COMMIT)}
+    - name: verify-rollout
+      runAfter: [flux-reconcile]
+      taskRef: {name: verify-rollout}
+      params:
+        - {name: IMAGE, value: "${ZOT_HOST}/pathops/tenant-control-plane:$(params.revision)"}
+        - {name: DIGEST, value: $(params.digest)}
+        - {name: HEALTH_URL, value: "https://${CONTROL_PLANE_HOST}/healthz"}
+    - name: request-preflight-tests
+      runAfter: [verify-rollout]
+      taskRef: {name: request-stage}
+      params:
+        - {name: URL, value: http://el-tenant-control-plane-preflight.pathops-tenant-control-plane-tekton-preflight.svc.cluster.local:8080}
+        - {name: EVENT, value: run-preflight-tests}
+        - {name: TOKEN_SECRET, value: tenant-cp-preflight-trigger}
+        - {name: NAMESPACE, value: pathops-tenant-control-plane-tekton-preflight}
+        - {name: PIPELINE, value: tenant-control-plane-run-preflight-tests}
+        - {name: COMMIT, value: $(params.commit)}
+        - {name: IMAGE_REVISION, value: $(params.revision)}
+        - {name: DIGEST, value: $(params.digest)}
+        - {name: HEALTH_PATH, value: $(params.health-path)}
