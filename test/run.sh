@@ -135,6 +135,15 @@ s = tasks["clone-gitops"]["spec"]["script"]
 assert "--branch main" in s and "checkout" not in s
 assert "push --quiet origin HEAD:main" in tasks["push-gitops"]["spec"]["script"] and "--force" not in tasks["push-gitops"]["spec"]["script"]
 '
+expect "image references: third-party images are tag + digest pinned; PathOps-built images are referenced only by :<HEAD12>, never @sha256" \
+  python3 -c '
+import glob, re, sys
+imgs = [l.split("image:", 1)[1].strip() for f in glob.glob(sys.argv[1] + "/.pathops/tekton/**/*.yaml", recursive=True) for l in open(f) if re.match(r"\s*(- )?image:", l)]
+pathops = [i for i in imgs if re.fullmatch(r"tenant-control-plane[a-z-]*", i)]  # kustomize names, set to :<HEAD12>
+assert pathops and all(re.fullmatch(r"(docker\.io|quay\.io|gcr\.io)/[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", i) for i in imgs if i not in pathops), imgs
+for f in glob.glob(sys.argv[1] + "/.pathops/**/*.yaml", recursive=True) + glob.glob(sys.argv[1] + "/*.yaml") + [sys.argv[1] + "/README.md"]:
+    assert not re.search(r"tenant-control-plane[a-z-]*(:[0-9a-f]{12}|:\$\S*)?@", open(f).read()), f
+' "$ROOT"
 expect "triggers: each stage event verifies its token and validates the body (revision, commit, digests, job)" \
   python3 -c '
 import sys, yaml
@@ -376,8 +385,8 @@ if command -v docker >/dev/null && { docker image inspect "$K8S_IMAGE" >/dev/nul
     bash -c 'out=$(k8s update-image.update.sh "P_COMMIT=$COMMIT" "P_IMAGE_REVISION=$REV" "P_DIGEST=$D1" P_PIPELINE_RUN=pr 2>&1) && grep -q "image: $ZOT/pathops/tenant-control-plane:$REV" <<<"$out" && ! grep -q "@sha256" <<<"$out" && grep -q "digest: $D1" "$1/.message"' _ "$W"
   expect "update-image: a revision not derived from the commit, or a non-digest, is rejected" \
     bash -c '! k8s update-image.update.sh "P_COMMIT=$COMMIT" P_IMAGE_REVISION=ffffffffffff "P_DIGEST=$D1" P_PIPELINE_RUN=pr >/dev/null 2>&1 && ! k8s update-image.update.sh "P_COMMIT=$COMMIT" "P_IMAGE_REVISION=$REV" P_DIGEST=latest P_PIPELINE_RUN=pr >/dev/null 2>&1'
-  expect "prepare-preflight-tests: a fresh Job with the test image of the revision, its digest annotated, the Cell login Secret and CA; listed once" \
-    bash -c 'out=$(k8s prepare-preflight-tests.job.sh "P_COMMIT=$COMMIT" "P_IMAGE_REVISION=$REV" "P_TESTS_DIGEST=$D2" P_JOB_NAME=tenant-control-plane-run-preflight-tests-abcde P_TARGET_URL=http://svc:8080 P_HEALTH_PATH=/healthz P_PIPELINE_RUN=pr 2>&1) && grep -q "name: tenant-control-plane-run-preflight-tests-abcde" <<<"$out" && grep -q "image: $ZOT/pathops/tenant-control-plane-integration-tests:$REV" <<<"$out" && grep -q "pathops.io/tests-digest: $D2" <<<"$out" && grep -q "name: tenant-cp-preflight-login" <<<"$out" && grep -q "automountServiceAccountToken: false" <<<"$out" && [ "$(grep -c "^- integration-test.yaml$" "$1/kustomization.yaml")" = 1 ]' _ "$W"
+  expect "prepare-preflight-tests: a fresh Job with the test image of the revision (never @sha256), its digest annotated, the Cell login Secret and CA; listed once" \
+    bash -c 'out=$(k8s prepare-preflight-tests.job.sh "P_COMMIT=$COMMIT" "P_IMAGE_REVISION=$REV" "P_TESTS_DIGEST=$D2" P_JOB_NAME=tenant-control-plane-run-preflight-tests-abcde P_TARGET_URL=http://svc:8080 P_HEALTH_PATH=/healthz P_PIPELINE_RUN=pr 2>&1) && grep -q "name: tenant-control-plane-run-preflight-tests-abcde" <<<"$out" && grep -q "image: $ZOT/pathops/tenant-control-plane-integration-tests:$REV" <<<"$out" && ! grep -q "@sha256" <<<"$out" && grep -q "pathops.io/tests-digest: $D2" <<<"$out" && grep -q "name: tenant-cp-preflight-login" <<<"$out" && grep -q "automountServiceAccountToken: false" <<<"$out" && [ "$(grep -c "^- integration-test.yaml$" "$1/kustomization.yaml")" = 1 ]' _ "$W"
 else
   SKIPPED=$((SKIPPED + 3))
   echo "SKIP GitOps edits (no Docker or $K8S_IMAGE): 3 checks"
