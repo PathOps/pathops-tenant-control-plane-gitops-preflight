@@ -287,7 +287,7 @@ bptclone() { rm -rf "$A/bpt" "$A/results/SOURCE_HEAD"; R=$A/results PATH="$A/src
 export -f bptclone
 export A
 expect "build-preflight-tests clone: the cloned source HEAD is the candidate's commit -> built; SOURCE_HEAD is the clone's git rev-parse" \
-  bash -c 'bptclone "$1" >/dev/null && [ "$(cat "$A/results/SOURCE_HEAD")" = "$1" ] && [ "$(git -C "$A/bpt" rev-parse HEAD)" = "$1" ]' _ "$SRC_HEAD"
+  bash -c 'bptclone "$1" >/dev/null && cmp -s "$A/results/SOURCE_HEAD" <(printf %s "$1") && [ "$(git -C "$A/bpt" rev-parse HEAD)" = "$1" ]' _ "$SRC_HEAD"
 expect "build-preflight-tests clone: a source HEAD that advanced past the candidate fails closed; no historical checkout" \
   bash -c 'git -C "$A/source" -c user.name=t -c user.email=t@t commit -q --allow-empty -m newer; new=$(git -C "$A/source" rev-parse HEAD); out=$(bptclone "$1"); [ $? -ne 0 ] && grep -q "source HEAD is $new, not the candidate $1" <<<"$out" && [ "$(cat "$A/results/SOURCE_HEAD")" = "$new" ] && ! grep -Eq "checkout|fetch" "$A/build-preflight-tests.clone.sh"' _ "$SRC_HEAD"
 
