@@ -96,11 +96,13 @@ assert ts["wait-tests"]["runAfter"] == ["flux-reconcile"] and "build-tests" in d
 r = params(ts["request-promote-release"])
 assert r["TESTS_DIGEST"] == "$(tasks.build-tests.results.VALUE)" and r["GITOPS_COMMIT"] == "$(tasks.prepare-tests.results.GITOPS_COMMIT)"
 '
-pycheck "BUILD_PREFLIGHT_TESTS: CLONE_SOURCE then the BUILD test-image build of the candidate commit (HEAD must match); returns the digest" '
+pycheck "BUILD_PREFLIGHT_TESTS: one BUILD Task (no clone-source) clones and builds the test image of the candidate commit (HEAD must match); returns the digest" '
 ts = t("build-preflight-tests")
-assert [v["taskRef"]["name"] for v in pl["build-preflight-tests"]["spec"]["tasks"]] == ["clone-source", "build-preflight-tests"]
+assert [v["taskRef"]["name"] for v in pl["build-preflight-tests"]["spec"]["tasks"]] == ["build-preflight-tests"]
 b = params(ts["build-preflight-tests"])
-assert b == {"COMMIT": "$(params.commit)", "CLONED": "$(tasks.clone-source.results.COMMIT)", "IMAGE_REVISION": "$(params.revision)"}
+assert b == {"COMMIT": "$(params.commit)", "IMAGE_REVISION": "$(params.revision)"}
+assert {"name": "source-head", "value": "$(tasks.build-preflight-tests.results.SOURCE_HEAD)"} in pl["build-preflight-tests"]["spec"]["results"]
+assert "clone-source" not in json.dumps(pl) + json.dumps(tasks) + json.dumps(tt)
 assert {"name": "tests-digest", "value": "$(tasks.build-preflight-tests.results.DIGEST)"} in pl["build-preflight-tests"]["spec"]["results"]
 d = tasks["build-preflight-tests"]["spec"]
 assert {p["name"]: p.get("default") for p in d["params"]}["DOCKERFILE"] == "test/integration/Dockerfile"
@@ -265,6 +267,29 @@ expect "wait-preflight-tests: waits for Flux to create the Job, requires the tes
   bash -c 'rm -f "$STATE.count"; printf "{\"status\":{\"conditions\":[{\"type\":\"Complete\",\"status\":\"True\"}]}}" >"$STATE.job"; out=$(JOB_APPEARS_AFTER=3 P_NAMESPACE=n P_JOB_NAME=j P_TESTS_DIGEST=$2 R=$1/results PATH="$1/kbin:$PATH" bash "$1/wait-preflight-tests.wait.sh") && [ "$(cat "$1/results/STATUS")" = passed ]' _ "$A" "$D2"
 expect "wait-preflight-tests: a failed Job, or a Job that ran another test image, fails" \
   bash -c 'printf "{\"status\":{\"conditions\":[{\"type\":\"Failed\",\"status\":\"True\"}]}}" >"$STATE.job"; out=$(P_NAMESPACE=n P_JOB_NAME=j P_TESTS_DIGEST=$2 R=$1/results PATH="$1/kbin:$PATH" bash "$1/wait-preflight-tests.wait.sh"); [ $? -ne 0 ] && grep -q "FAIL: TestHealthz" <<<"$out" && printf "{\"status\":{\"conditions\":[{\"type\":\"Complete\",\"status\":\"True\"}]}}" >"$STATE.job" && out=$(JOB_IMAGE_ID=zot/tests@$3 P_NAMESPACE=n P_JOB_NAME=j P_TESTS_DIGEST=$2 R=$1/results PATH="$1/kbin:$PATH" bash "$1/wait-preflight-tests.wait.sh"); [ $? -ne 0 ] && grep -q "did not run the test image" <<<"$out"' _ "$A" "$D2" "$D1"
+
+# --- build-preflight-tests clone: the current source HEAD must be the candidate's commit
+step build-preflight-tests clone
+git -c init.defaultBranch=main init -q "$A/source"
+git -C "$A/source" -c user.name=t -c user.email=t@t commit -q --allow-empty -m candidate
+SRC_HEAD=$(git -C "$A/source" rev-parse HEAD)
+mkdir -p "$A/srcbin"
+cat >"$A/srcbin/git" <<GIT
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do case \$a in ssh://*) args+=("file://$A/source") ;; *) args+=("\$a") ;; esac; done
+exec $(command -v git) "\${args[@]}"
+GIT
+printf '#!/usr/bin/env bash\n: # the deploy key copy\n' >"$A/srcbin/install"
+chmod +x "$A/srcbin/git" "$A/srcbin/install"
+sed -i "s#/work/src#$A/bpt#g; s#/pathops/source-key#$A#g" "$A/build-preflight-tests.clone.sh"
+bptclone() { rm -rf "$A/bpt" "$A/results/SOURCE_HEAD"; R=$A/results PATH="$A/srcbin:$PATH" P_SOURCE_REPO=pathops/x P_COMMIT=$1 P_IMAGE_REVISION=${1:0:12} bash "$A/build-preflight-tests.clone.sh" 2>&1; }
+export -f bptclone
+export A
+expect "build-preflight-tests clone: the cloned source HEAD is the candidate's commit -> built; SOURCE_HEAD is the clone's git rev-parse" \
+  bash -c 'bptclone "$1" >/dev/null && [ "$(cat "$A/results/SOURCE_HEAD")" = "$1" ] && [ "$(git -C "$A/bpt" rev-parse HEAD)" = "$1" ]' _ "$SRC_HEAD"
+expect "build-preflight-tests clone: a source HEAD that advanced past the candidate fails closed; no historical checkout" \
+  bash -c 'git -C "$A/source" -c user.name=t -c user.email=t@t commit -q --allow-empty -m newer; new=$(git -C "$A/source" rev-parse HEAD); out=$(bptclone "$1"); [ $? -ne 0 ] && grep -q "source HEAD is $new, not the candidate $1" <<<"$out" && [ "$(cat "$A/results/SOURCE_HEAD")" = "$new" ] && ! grep -Eq "checkout|fetch" "$A/build-preflight-tests.clone.sh"' _ "$SRC_HEAD"
 
 # --- promote-release: the release tag (created, adopted, conflict) and the GHCR digest
 step promote-release tag

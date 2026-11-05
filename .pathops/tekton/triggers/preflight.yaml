@@ -16,9 +16,8 @@
 #
 # Execution roles (Decision 0052) are materialized by these TriggerTemplates,
 # the PipelineRuns' creators: the preflight pipelines are GENERAL, as
-# tenant-control-plane-preflight; in BUILD_PREFLIGHT_TESTS, clone-source is
-# GENERAL (tenant-control-plane-ci) and build-preflight-tests runs with BUILD
-# as tenant-control-plane-test-build.
+# tenant-control-plane-preflight; BUILD_PREFLIGHT_TESTS's only Task,
+# build-preflight-tests, runs with BUILD as tenant-control-plane-test-build.
 apiVersion: triggers.tekton.dev/v1beta1
 kind: TriggerBinding
 metadata: {name: tenant-control-plane-stage-request, namespace: pathops-tenant-control-plane-tekton-preflight}

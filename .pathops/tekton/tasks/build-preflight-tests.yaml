@@ -9,10 +9,10 @@
 # as tenant-control-plane-test-build: source read, test-image create and build
 # cache update in zot; no GitOps authority.
 #
-#   clone  current source main, inside the BUILD Pod; HEAD must be the
-#          candidate's commit (COMMIT) and the one CLONE_SOURCE saw (CLONED):
-#          a newer source HEAD fails closed (no old candidate tested with new
-#          tests), and no historical checkout is made
+#   clone  current source main, inside the BUILD Pod; its HEAD must be the
+#          candidate's commit (COMMIT): a newer source HEAD fails closed (no
+#          old candidate tested with new tests), and no historical checkout is
+#          made; the cloned HEAD is SOURCE_HEAD
 #   auth   short-lived zot credential (Dex token exchange of the projected
 #          ServiceAccount token)
 #   build  BuildKit with the registry caches (the source build's included)
@@ -24,7 +24,6 @@ metadata: {name: build-preflight-tests}
 spec:
   params:
     - {name: COMMIT, description: full source commit of the candidate under test}
-    - {name: CLONED, description: the source HEAD CLONE_SOURCE saw}
     - {name: IMAGE_REVISION, description: "first 12 hex characters of COMMIT: the candidate tag"}
     - {name: SOURCE_REPO, default: pathops/pathops-tenant-control-plane}
     - {name: REPO, default: pathops/tenant-control-plane-integration-tests, description: test-image repository in the Cell zot}
@@ -32,6 +31,7 @@ spec:
     - {name: CACHE, default: "pathops/cache/tenant-control-plane:integration-tests", description: "the cache tag this build exports"}
     - {name: IMPORT_CACHES, default: "pathops/cache/tenant-control-plane:integration-tests", description: "cache tags imported (a missing one is skipped); only this build's own: importing two caches that share a prefix stops the reuse after it"}
   results:
+    - {name: SOURCE_HEAD, description: the source HEAD this Task cloned}
     - {name: DIGEST, description: "OCI digest of the test-image tag"}
     - {name: ADOPTED, description: "true if the test-image tag already existed for COMMIT and was reused"}
     - {name: CACHE, description: "exported | failed"}
@@ -64,8 +64,9 @@ spec:
         export GIT_SSH_COMMAND="ssh -i /tmp/git-identity -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/pathops/source-key/known_hosts"
         git clone --quiet --depth 1 --branch main "ssh://git@forgejo.scm.svc.cluster.local:2222/$(params.SOURCE_REPO).git" /work/src
         head=$(git -C /work/src rev-parse HEAD)
-        [ "$(params.CLONED)" = "$(params.COMMIT)" ] && [ "$head" = "$(params.COMMIT)" ] \
-          || { echo "source HEAD is $head (CLONE_SOURCE saw $(params.CLONED)), not the candidate $(params.COMMIT): no tests of a newer source for an older candidate; fails closed"; exit 1; }
+        printf '%s' "$head" > "$(results.SOURCE_HEAD.path)"
+        [ "$head" = "$(params.COMMIT)" ] \
+          || { echo "source HEAD is $head, not the candidate $(params.COMMIT): no tests of a newer source for an older candidate; fails closed"; exit 1; }
         [ "$(params.IMAGE_REVISION)" = "$(printf '%s' "$head" | cut -c1-12)" ] || { echo "revision $(params.IMAGE_REVISION) is not derived from $head"; exit 1; }
         # A context whose metadata depends on its content only: BuildKit's
         # COPY checksums include modes, and the BUILD Pod's fsGroup volume
