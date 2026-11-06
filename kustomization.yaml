@@ -20,4 +20,4 @@ images:
   newTag: 1ba57727242b
 - name: tenant-control-plane-integration-tests
   newName: zot-dev.demo.pathops.io/pathops/tenant-control-plane-integration-tests
-  newTag: 45de10d15c43
+  newTag: 1ba57727242b
