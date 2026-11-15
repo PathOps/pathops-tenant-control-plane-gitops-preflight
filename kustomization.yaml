@@ -17,7 +17,7 @@ resources:
 images:
 - name: tenant-control-plane
   newName: zot-dev.demo.pathops.io/pathops/tenant-control-plane
-  newTag: 4e3fa1ada13e
+  newTag: c27d8f337277
 - name: tenant-control-plane-integration-tests
   newName: zot-dev.demo.pathops.io/pathops/tenant-control-plane-integration-tests
   newTag: 4e3fa1ada13e
