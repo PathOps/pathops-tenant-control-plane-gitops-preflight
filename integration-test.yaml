@@ -1,10 +1,10 @@
-# One integration-test run, written by PREPARE_PREFLIGHT_TESTS (tenant-control-plane-run-preflight-tests-jspk5).
+# One integration-test run, written by PREPARE_PREFLIGHT_TESTS (tenant-control-plane-run-preflight-tests-r89rj).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-control-plane-run-preflight-tests-jspk5
-  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "4f0e09674b6e"}
-  annotations: {pathops.io/source-commit: "4f0e09674b6ea84f527d397827e6e2ce4522fae8", pathops.io/tests-digest: "sha256:3d4c99645b5a8ca2e77ee13ecd6d2fe7727ce6635b877f75d7f804d33dc9676d"}
+  name: tenant-control-plane-run-preflight-tests-r89rj
+  labels: {app.kubernetes.io/name: tenant-control-plane-tests, pathops.io/source-revision: "d0c1392cb886"}
+  annotations: {pathops.io/source-commit: "d0c1392cb8864e7aa378492fc386a4536ae8f7b0", pathops.io/tests-digest: "sha256:de09dd20dc4ce7c66b46cda053935f8970d49d220f4aebf88fa030b46116e8e4"}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
